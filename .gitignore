@@ -9,3 +9,6 @@ downloads/
 dist/
 build/
 .eggs/
+.mypy_cache/
+.pytest_cache/
+instructions.md
