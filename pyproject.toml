@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pinterest-downloader"
+version = "1.0.0"
+description = "Download and archive Pinterest boards"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Pinterest Board Downloader"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "aiohttp>=3.9.0",
+    "aiofiles>=23.2.0",
+    "click>=8.1.0",
+    "rich>=13.7.0",
+    "python-dotenv>=1.0.0",
+    "pillow>=10.0.0",
+]
+
+[project.scripts]
+pinterest-downloader = "pinterest_downloader.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pinterest_downloader"]
