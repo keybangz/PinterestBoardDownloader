@@ -615,7 +615,7 @@ class PinterestBrowser:
 
         # Use scroll-extracted pins (more complete due to virtualization)
         for pin_data in pins_data:
-            pin = self._create_pin_from_data(pin_data)
+            pin = self._create_pin_from_data(pin_data, board_url)
             if pin:
                 pins.append(pin)
 
@@ -643,160 +643,140 @@ class PinterestBrowser:
         # EXHAUSTIVE SCROLL PARAMETERS: Force full content loading
         max_same = 3  # Need 3 no-growth signals before exiting
         scroll_attempts = 0
-        max_attempts = 600  # Ensure full page coverage (was 40)
 
-        last_pin_count = 0  # Current scroll's pin counter
-        pin_growth_stalled = 0  # Consecutive checks with no NEW pins
+        last_valid_pin_count = 0  # Valid /pin/{numeric_id}/ growth tracker
+        pin_growth_stalled = 0  # Consecutive checks with no NEW valid pins
 
         # PERSISTENT PIN CACHE: Track ALL pins discovered across all scrolls
         all_discovered_pins: set = set()  # Store unique pin URLs
         all_extracted_pins: list = []  # Store full pin data
-        max_pins_ever = 0  # Maximum pins seen at any point
+        all_discovered_pin_ids: set[str] = set()  # Valid numeric pin IDs only
+        current_scroll_y = 0
 
         # BALANCED DELAY: Allow lazy loading while being efficient
         base_delay = 1.0  # 1 second between scrolls
 
-        console.print(
-            f"[dim]Config: max {max_attempts} scrolls, {max_same} no-growth checks needed[/dim]"
-        )
-
-        async def smart_scroll(scroll_num: int, total_height: float) -> None:
-            """Simple progressive scroll from top to bottom using page height."""
-            viewport = await self._page.evaluate("window.innerHeight")
-            scrollable = total_height - viewport
-
-            if scrollable <= 0:
-                await self._page.evaluate("window.scrollTo(0, 0)")
-                return
-
-            # Divide scrollable height into 6 steps
-            steps = 6
-            step_size = scrollable / steps
-
-            # Calculate target position based on scroll_num
-            target = scroll_num * step_size
-
-            # Clamp to max scrollable
-            if target > scrollable:
-                target = scrollable
-
-            await self._page.evaluate(f"window.scrollTo(0, {target})")
-
         viewport = await self._page.evaluate("window.innerHeight")
-        max_attempts = int(
-            (await self._page.evaluate("document.body.scrollHeight") - viewport) / 200
-        )
-        max_attempts = max(max_attempts, 20)  # floor at 20 scrolls
+        viewport_step = max(1, int(viewport * 0.9))
+        max_attempts = 50
 
         console.print(
-            f"[dim]Calculated max scroll count based on page height: {max_attempts}[/dim]"
+            f"[dim]Config: max {max_attempts} scrolls (dynamic), {max_same} no-growth checks needed[/dim]"
         )
 
-        while scroll_attempts < max_attempts:
+        while True:
             if self._shutdown_event is not None and self._shutdown_event.is_set():
                 console.print("[yellow]Scroll interrupted by shutdown signal[/yellow]")
                 break
+
+            scroll_height = await self._page.evaluate("document.body.scrollHeight")
+            max_attempts = min(800, max(50, int(scroll_height // viewport_step)))
+
+            if scroll_attempts >= max_attempts:
+                console.print(
+                    f"\n[yellow]✓ Reached max scroll limit ({max_attempts} scrolls, {len(all_discovered_pins)} pins)[/yellow]"
+                )
+                return all_discovered_pins, all_extracted_pins
+
             scroll_attempts += 1
 
-            await smart_scroll(
-                scroll_attempts, await self._page.evaluate("document.body.scrollHeight")
-            )
+            current_scroll_y = await self._smart_scroll(self._page, current_scroll_y)
             await asyncio.sleep(
                 base_delay + random.uniform(0.5, 1.5)
             )  # Randomize delay
 
             try:
                 # Extract pin data during scrolling to catch virtualized content
-                extracted_pins = await self._page.evaluate("""
+                extracted_pins = await self._page.evaluate(r"""
                     () => {
+                        // Board container scoping
+                        const feed = document.querySelector('[data-test-id="board-feed"]')
+                          || document.querySelector('[data-test-id="pin-feed"]')
+                          || document.querySelector('[data-test-id="MasonryContainer"]')
+                          || document.querySelector('main')
+                          || document.body;
+
+                        // Only collect images that have a /pin/{id}/ parent anchor
+                        const pinLinks = Array.from(feed.querySelectorAll('a[href*="/pin/"]'));
                         const pins = [];
-                        const seenUrls = new Set();
-                        
-                        const images = document.querySelectorAll('img[src*="pinimg"], img[src*="cdn.pinimg"], img[src*="i.pinimg"]');
-                        
-                        images.forEach(img => {
-                            if (!img.src || img.src.includes('data:image')) return;
-                            const src = img.src.toLowerCase();
-                            if (src.includes('profile') || src.includes('avatar') ||
-                                src.includes('logo') || src.includes('icon') ||
-                                src.includes('button') || src.includes('pinterest')) return;
-                                
-                            const url = img.src;
-                            if (seenUrls.has(url)) return;
-                            seenUrls.add(url);
-                            
-                            // Minimal pin data extraction (similar to full extraction)
-                            const pinData = {};
-                            pinData.image_url = url;
-                            
-                            // Title from alt or URL
-                            if (img.alt && img.alt.length > 3 && !img.alt.includes('Pin card') && img.alt !== 'Image') {
-                                pinData.title = img.alt.substring(0, 200);
-                            } else {
-                                const urlMatch = url.match(/\\/([a-zA-Z0-9]+)(?:\\/|\\.)/);
-                                pinData.title = urlMatch ? 'Pin_' + urlMatch[1] : 'Pin';
-                            }
-                            
-                            // Simplified ID extraction
-                            let pinId = null;
-                            const urlIdMatch = url.match(/\\/\\d+x\\w*\\/([a-zA-Z0-9]+)/) || 
-                                            url.match(/\\/originals\\/([a-zA-Z0-9]+)/) || 
-                                            url.match(/\\/([a-zA-Z0-9]+)(?:\\/|\\.)/);
-                            if (urlIdMatch) pinId = urlIdMatch[1];
-                            
-                            if (!pinId) {
-                                // Fallback hash
-                                let hash = 0;
-                                for (let i = 0; i < url.length; i++) {
-                                    hash = ((hash << 5) - hash) + url.charCodeAt(i);
-                                    hash |= 0;
-                                }
-                                pinId = 'url_' + Math.abs(hash).toString(36);
-                            }
-                            
-                            pinData.id = pinId;
-                            pins.push(pinData);
-                        });
-                        
-                        return { pins: pins, count: pins.length };
+                        const seen = new Set();
+
+                        for (const link of pinLinks) {
+                          const href = link.getAttribute('href') || '';
+                          const m = href.match(/\/pin\/(\d+)\//);
+                          if (!m) continue;
+                          const pinId = m[1];
+                          if (seen.has(pinId)) continue;
+                          seen.add(pinId);
+
+                          const img = link.querySelector('img[src*="pinimg"]');
+                          if (!img) continue;
+
+                          pins.push({
+                            pin_id: pinId,
+                            src: img.src || img.getAttribute('src') || '',
+                            alt: img.alt || ''
+                          });
+                        }
+
+                        // Check if "related pins" section has appeared — if so, we've passed the board
+                        const sentinel = document.querySelector('[data-test-id="related-pins-header"]')
+                          || document.querySelector('[data-test-id="more-ideas"]')
+                          || Array.from(document.querySelectorAll('h2,h3')).find(
+                               h => /more ideas|related boards|more from/i.test(h.textContent)
+                             );
+
+                        return { pins: pins, sentinel_found: !!sentinel };
                     }
                 """)
 
-                pin_count = extracted_pins["count"]
-                current_pins = extracted_pins["pins"]
+                current_pins = extracted_pins.get("pins", [])
+                sentinel_found = extracted_pins.get("sentinel_found", False)
 
                 # Extract URLs and deduplicate
                 current_urls = set()
                 for pin in current_pins:
-                    image_url = pin.get("image_url")
+                    image_url = pin.get("src")
                     if image_url:
                         current_urls.add(image_url)
 
                         # Add new pins to extracted list
                         if image_url not in all_discovered_pins:
-                            all_extracted_pins.append(pin)
+                            all_extracted_pins.append(
+                                {
+                                    "id": pin.get("pin_id", ""),
+                                    "image_url": image_url,
+                                    "title": pin.get("alt", "")
+                                    or f"Pin_{pin.get('pin_id', '')}",
+                                }
+                            )
+
+                    pin_id = str(pin.get("pin_id", ""))
+                    if pin_id.isdigit():
+                        all_discovered_pin_ids.add(pin_id)
 
                 # Update persistent cache with any NEW pins discovered
                 new_pins = current_urls - all_discovered_pins
                 all_discovered_pins.update(new_pins)
-                max_pins_ever = max(max_pins_ever, len(all_discovered_pins))
 
-                # Track pin growth using MAX pins ever seen
-                if len(all_discovered_pins) > max_pins_ever:
-                    max_pins_ever = len(all_discovered_pins)
-
-                if len(all_discovered_pins) > last_pin_count:
+                if len(all_discovered_pin_ids) > last_valid_pin_count:
                     console.print(
-                        f"[dim]  Scroll {scroll_attempts}: GROWING {last_pin_count} → {len(all_discovered_pins)} (max: {max_pins_ever})[/dim]"
+                        f"[dim]  Scroll {scroll_attempts}: GROWING valid pins {last_valid_pin_count} → {len(all_discovered_pin_ids)} (images: {len(all_discovered_pins)})[/dim]"
                     )
                     pin_growth_stalled = 0
                 else:
                     pin_growth_stalled += 1
                     console.print(
-                        f"[dim]  Scroll {scroll_attempts}: STALLED at {len(all_discovered_pins)} ({pin_growth_stalled}/3)[/dim]"
+                        f"[dim]  Scroll {scroll_attempts}: STALLED valid pins at {len(all_discovered_pin_ids)} ({pin_growth_stalled}/3)[/dim]"
                     )
 
-                last_pin_count = len(all_discovered_pins)
+                last_valid_pin_count = len(all_discovered_pin_ids)
+
+                if sentinel_found:
+                    console.print(
+                        "\n[yellow]✓ Related-content sentinel detected; stopping at board boundary[/yellow]"
+                    )
+                    return all_discovered_pins, all_extracted_pins
 
                 # Exit at hard ceiling
                 if scroll_attempts >= max_attempts:
@@ -818,10 +798,20 @@ class PinterestBrowser:
             # Visual progress for long scrolls
             if scroll_attempts > 0 and scroll_attempts % 10 == 0:
                 console.print(
-                    f"\n[dim]→ Scroll progress: {scroll_attempts}/{max_attempts}, pins seen: {last_pin_count}[/dim]"
+                    f"\n[dim]→ Scroll progress: {scroll_attempts}/{max_attempts}, valid pins seen: {last_valid_pin_count}[/dim]"
                 )
 
         return all_discovered_pins, all_extracted_pins
+
+    async def _smart_scroll(self, page, current_y: int) -> int:
+        """Scroll one viewport-height step. Returns new scroll Y position."""
+        viewport_height = await page.evaluate("window.innerHeight")
+        step = int(viewport_height * 0.9)  # 90% overlap for lazy loader
+        new_y = current_y + step
+        await page.evaluate(f"window.scrollTo(0, {new_y})")
+        await asyncio.sleep(0.4)
+        actual_y = await page.evaluate("window.pageYOffset")
+        return actual_y
 
     async def _extract_pins_from_page(self) -> list[dict[str, Any]]:
         """Extract pin data from loaded page with deduplication."""
@@ -830,113 +820,45 @@ class PinterestBrowser:
 
         pins = await self._page.evaluate(r"""
             () => {
+                // Board container scoping
+                const feed = document.querySelector('[data-test-id="board-feed"]')
+                  || document.querySelector('[data-test-id="pin-feed"]')
+                  || document.querySelector('[data-test-id="MasonryContainer"]')
+                  || document.querySelector('main')
+                  || document.body;
+
+                // Only collect images that have a /pin/{id}/ parent anchor
+                const pinLinks = Array.from(feed.querySelectorAll('a[href*="/pin/"]'));
                 const pins = [];
-                const seenUrls = new Set();  // Deduplicate by URL instead of ID
-                let skippedByFilter = 0;
-                let skippedByDedup = 0;
-                let processedCount = 0;
+                const seen = new Set();
 
-                // EXACTLY match scroll detection: get all pin-related images
-                const allImages = document.querySelectorAll('img[src*="pinimg"], img[src*="cdn.pinimg"], img[src*="i.pinimg"]');
+                for (const link of pinLinks) {
+                  const href = link.getAttribute('href') || '';
+                  const m = href.match(/\/pin\/(\d+)\//);
+                  if (!m) continue;  // skip non-numeric — related content, profiles
+                  const pinId = m[1];
+                  if (seen.has(pinId)) continue;
+                  seen.add(pinId);
 
-                console.log(`Found ${allImages.length} total images for extraction`);
+                  const img = link.querySelector('img[src*="pinimg"]');
+                  if (!img) continue;
 
-                allImages.forEach(img => {
-                    if (!img.src || img.src.includes('data:image')) {
-                        skippedByFilter++;
-                        return;
-                    }
+                  pins.push({
+                    id: pinId,
+                    image_url: img.src || img.getAttribute('src') || '',
+                    title: (img.alt || '').trim() || `Pin_${pinId}`
+                  });
+                }
 
-                    // EXACTLY match scroll detection filters
-                    const src = img.src.toLowerCase();
-                    if (src.includes('profile') || src.includes('avatar') || 
-                        src.includes('logo') || src.includes('icon') ||
-                        src.includes('button') || src.includes('pinterest')) {
-                        skippedByFilter++;
-                        return;
-                    }
-
-                    const pinData = {};
-
-                    // Use original src WITHOUT transformation during extraction
-                    // Keep URL exactly as found - transformation happens later
-                    let url = img.src;
-                    pinData.image_url = url;
-
-                    // Get title from alt or derive from URL
-                    if (img.alt && img.alt.length > 3 && !img.alt.includes('Pin card') && img.alt !== 'Image') {
-                        pinData.title = img.alt.substring(0, 200);
-                    } else {
-                        // Generate title from URL
-                        const urlMatch = url.match(/\/([a-zA-Z0-9]+)(?:\/|\.)/);
-                        if (urlMatch) {
-                            pinData.title = 'Pin_' + urlMatch[1];
-                        } else {
-                            pinData.title = 'Pin';
-                        }
-                    }
-
-                    // Get ID - simplified approach
-                    let pinId = null;
-
-                    // 1. First try: Extract from URL pattern (most reliable)
-                    // Pattern: /{size}/{id}/ or /{size}/{id}. or /originals/{id}/
-                    const urlIdMatch = url.match(/\/\d+x\w*\/([a-zA-Z0-9]+)/) || 
-                                      url.match(/\/originals\/([a-zA-Z0-9]+)/) || 
-                                      url.match(/\/([a-zA-Z0-9]+)(?:\/|\.)/);
-                    if (urlIdMatch) pinId = urlIdMatch[1];
-
-                    // 2. Try parent container data attributes
-                    if (!pinId) {
-                        const container = img.closest('[data-test-pin-id]') || img.closest('[data-pin-id]') || 
-                                        img.closest('[data-id]') || img.closest('[data-test-id="pin"]');
-                        if (container) {
-                            pinId = container.getAttribute('data-test-pin-id') || 
-                                   container.getAttribute('data-pin-id') || 
-                                   container.getAttribute('data-id');
-                        }
-                    }
-
-                    // 3. Try link href pattern
-                    if (!pinId) {
-                        const link = img.closest('a');
-                        if (link && link.href) {
-                            const match = link.href.match(/\/pin\/([a-zA-Z0-9]+)/);
-                            if (match) pinId = match[1];
-                        }
-                    }
-
-                    // 4. Generate from URL if needed - simpler approach
-                    if (!pinId) {
-                        // Use hash of URL as fallback ID
-                        let hash = 0;
-                        for (let i = 0; i < url.length; i++) {
-                            hash = ((hash << 5) - hash) + url.charCodeAt(i);
-                            hash |= 0;
-                        }
-                        pinId = 'url_' + Math.abs(hash).toString(36);
-                    }
-
-                    // Deduplicate by IMAGE URL (not ID) to match scroll counting
-                    if (seenUrls.has(url)) {
-                        skippedByDedup++;
-                        return;
-                    }
-                    seenUrls.add(url);
-
-                    pinData.id = pinId;
-                    pins.push(pinData);
-                    processedCount++;
-                });
-
-                console.log(`Extraction stats: Total=${allImages.length}, SkippedFilter=${skippedByFilter}, SkippedDedup=${skippedByDedup}, Extracted=${pins.length}`);
                 return pins;
             }
         """)
 
         return pins or []
 
-    def _create_pin_from_data(self, data: dict[str, Any]) -> Optional[Pin]:
+    def _create_pin_from_data(
+        self, data: dict[str, Any], board_url: str = ""
+    ) -> Optional[Pin]:
         """Create Pin object from extracted data."""
         try:
             pin_id = str(data.get("id", ""))
@@ -950,7 +872,7 @@ class PinterestBrowser:
             # Transform URL to get higher quality image if possible
             # Similar to what scraper.py does
             transformed_url = image_url
-            if "/originals/" not in transformed_url:
+            if pin_id.isdigit() and "/originals/" not in transformed_url:
                 # Replace size patterns like /236x/, /474x/, /736x/, etc. with /originals/
                 transformed_url = re.sub(r"/\d+x\w*/", "/originals/", transformed_url)
                 # Also handle patterns like _736x.jpg -> _original.jpg
@@ -959,6 +881,10 @@ class PinterestBrowser:
             title = str(data.get("title", "") or f"Pin_{pin_id}")
             description = str(data.get("description", title))
 
+            # Parse board_id from board_url e.g. https://pinterest.com/user/boardname/
+            parts = [p for p in (board_url or "").rstrip("/").split("/") if p]
+            board_id = parts[-1] if len(parts) >= 2 else ""
+
             return Pin(
                 id=pin_id,
                 title=title[:200],
@@ -966,7 +892,7 @@ class PinterestBrowser:
                 media_url=transformed_url,
                 media_type="image",
                 original_filename=None,
-                board_id="",
+                board_id=board_id,
                 created_at="",
             )
         except (KeyError, TypeError, ValueError) as e:
