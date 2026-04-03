@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -47,7 +49,12 @@ class PinterestBrowser:
     BASE_URL = "https://www.pinterest.com"
     COOKIES_FILE = "pinterest_cookies.json"
 
-    def __init__(self, config: Config, headless: bool = False) -> None:
+    def __init__(
+        self,
+        config: Config,
+        headless: bool = False,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ) -> None:
         if not PLAYWRIGHT_AVAILABLE:
             raise ImportError(
                 "Playwright is not installed. Install with:\n"
@@ -61,6 +68,7 @@ class PinterestBrowser:
         self._page: Optional[Page] = None
         self._closed: bool = False
         self._credentials: Optional[LoginCredentials] = None
+        self._shutdown_event: Optional[asyncio.Event] = shutdown_event
 
         # Auto-load credentials from config
         if config.pinterest_username and config.pinterest_password:
@@ -109,8 +117,20 @@ class PinterestBrowser:
         if cookies_path.exists():
             try:
                 cookies = json.loads(cookies_path.read_text())
+                session_cookies = [
+                    c
+                    for c in cookies
+                    if c.get("name") in ("_pinterest_sess", "csrftoken")
+                ]
+                if not session_cookies:
+                    logger.warning(
+                        "Cookie file exists but contains no Pinterest session cookies "
+                        "(_pinterest_sess / csrftoken). Session may be expired or anonymous."
+                    )
                 await self._context.add_cookies(cookies)
-                logger.info("Loaded saved cookies")
+                logger.info(
+                    f"Loaded {len(cookies)} saved cookies ({len(session_cookies)} auth cookies)"
+                )
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Could not load cookies: {e}")
 
@@ -154,7 +174,26 @@ class PinterestBrowser:
             )
             await asyncio.sleep(2)
             if await self._has_login_indicators():
-                console.print("[green]✓ Valid session from cookies[/green]")
+                # Optionally verify we're logged in as the expected account
+                if self.config.pinterest_username:
+                    expected = self.config.pinterest_username.lower().strip()
+                    try:
+                        profile_link = await self._page.query_selector(
+                            f'a[href="/{expected}/"], a[href*="/{expected}"]'
+                        )
+                        if profile_link is None:
+                            logger.warning(
+                                f"Session verified but profile link for '{expected}' not found — "
+                                "cookies may belong to a different account"
+                            )
+                            console.print(
+                                f"[yellow]⚠ Session verified but could not confirm account is '{expected}'[/yellow]"
+                            )
+                    except Exception:
+                        pass
+                console.print(
+                    "[green]✓ Valid session verified (authenticated elements found)[/green]"
+                )
                 await self._save_or_update_cookies()
                 return True
         except Exception as e:
@@ -177,62 +216,60 @@ class PinterestBrowser:
         return await self._perform_manual_login()
 
     async def _quick_login_check(self) -> bool:
-        """Check current page for login indicators without navigation."""
+        """Return True only when a positively-authenticated DOM element is found.
+
+        Uses an explicit whitelist of selectors that ONLY appear when a user
+        is signed in. Avoids the permissive 'not on login page = logged in'
+        heuristic that produced false positives on Pinterest's public homepage.
+        """
         if not self._page:
             return False
 
         url = self._page.url
-
-        # Quick exit if clearly on login page
+        # Fast-path: definitely not logged in
         if "login" in url.lower() or url.endswith("/login"):
             return False
+        # Fast-path: blank/unloaded page - no auth check possible
+        if not url or url == "about:blank":
+            return False
 
-        # Use a short timeout for queries
+        # Selectors that ONLY appear in an authenticated session
+        AUTHED_SELECTORS = [
+            '[data-test-id="header-profile"]',  # Profile button in top nav
+            'div[data-test-id="header-user-menu"]',  # User dropdown menu
+            '[aria-label="Switch account"]',  # Multi-account badge (signed-in)
+            'a[href="/settings/"]',  # Settings link (signed-in only)
+            'button[aria-label*="Your profile"]',
+            'button[aria-label*="profile picture"]',
+        ]
+
+        # Presence of this element confirms NOT logged in (guest upsell CTA)
+        NEGATIVE_SELECTORS = [
+            'a[href="/business/create"]',
+        ]
+
         try:
-            selectors = [
-                # Standard/Premium account indicators
-                '[data-test-id="header-profile"]',
-                'nav a[href*="/boards"]',
-                'a[href="/settings/"]',
-                'button[aria-label*="profile"]',
-                'a[href*="/user/"]',
-                # Business account indicators
-                'a[href="/business/create"]',  # If this exists, they're NOT logged in
-                '[aria-label="Switch account"]',  # Can appear in header
-                'div[data-test-id="header-user-menu"]',  # User menu
-                # General indicators
-                'nav[aria-label*="primary"]',  # Main nav that only appears when logged in
-                'div[role="banner"] a:not([href*="login"])',  # Banner links when logged in
-                # Global menu check (appears for both regular and business)
-                'button[aria-label*="global"]',
-            ]
-
-            for selector in selectors:
+            for selector in NEGATIVE_SELECTORS:
                 try:
-                    element = await self._page.query_selector(selector)
-                    if element:
-                        # Additional check for business account indicator
-                        if "business/create" in selector:
-                            return False
+                    el = await self._page.query_selector(selector)
+                    if el:
+                        logger.debug(f"Not-logged-in indicator found: {selector}")
+                        return False
+                except Exception:
+                    pass
+
+            for selector in AUTHED_SELECTORS:
+                try:
+                    el = await self._page.query_selector(selector)
+                    if el:
+                        logger.debug(f"Auth indicator found: {selector}")
                         return True
-                except:
+                except Exception:
                     continue
-        except:
+        except Exception:
             pass
 
-        # Fallback: If we're not on login and the page has loaded content
-        # (not infinite spinner), assume logged in
-        try:
-            url = self._page.url
-            if "login" not in url.lower() and "loading" not in url.lower():
-                # Check that we're actually on Pinterest and not an error page
-                if "pinterest.com" in url or url == "about:blank":
-                    content = await self._page.content()
-                    if len(content) > 1000 and "login" not in content[:1000].lower():
-                        return True
-        except:
-            pass
-
+        # No positive authenticated indicator found — treat as not logged in
         return False
 
     async def _has_login_indicators(self) -> bool:
@@ -445,7 +482,7 @@ class PinterestBrowser:
         console.print("\n[bold]Waiting for manual login...[/bold]")
 
         for i in range(150):
-            if _shutdown_event.is_set():
+            if self._shutdown_event is not None and self._shutdown_event.is_set():
                 return False
 
             await asyncio.sleep(2)
@@ -541,49 +578,65 @@ class PinterestBrowser:
             if "login" in self._page.url.lower():
                 return pins
 
-# Scroll to load ALL pins first and get URLs discovered during scrolling
+        # Scroll to load ALL pins first and get URLs discovered during scrolling
         discovered_urls, scroll_extracted_pins = await self._scroll_to_load_all()
-        console.print(f"[dim]Discovered {len(discovered_urls)} unique image URLs during scrolling, extracted {len(scroll_extracted_pins)} pin data entries[/dim]")
-        
-# Use pins extracted DURING scrolling (captures virtualized content)
+        console.print(
+            f"[dim]Discovered {len(discovered_urls)} unique image URLs during scrolling, extracted {len(scroll_extracted_pins)} pin data entries[/dim]"
+        )
+
+        # Use pins extracted DURING scrolling (captures virtualized content)
         console.print("[cyan]Processing pins extracted during scrolling...[/cyan]")
         pins_data = scroll_extracted_pins
-        
+
         # Also run post-scroll extraction for comparison/debug
         await asyncio.sleep(2)
         post_scroll_pins_data = await self._extract_pins_from_page()
-        
+
         # Debug comparison
-        scroll_urls = {pin.get("image_url", "") for pin in scroll_extracted_pins if pin.get("image_url")}
-        post_scroll_urls = {pin.get("image_url", "") for pin in post_scroll_pins_data if pin.get("image_url")}
-        
+        scroll_urls = {
+            pin.get("image_url", "")
+            for pin in scroll_extracted_pins
+            if pin.get("image_url")
+        }
+        post_scroll_urls = {
+            pin.get("image_url", "")
+            for pin in post_scroll_pins_data
+            if pin.get("image_url")
+        }
+
         missing_in_post = scroll_urls - post_scroll_urls
         if missing_in_post:
-            console.print(f"[yellow]Warning: {len(missing_in_post)} pins captured during scrolling missing in post-scroll extraction[/yellow]")
-            console.print(f"[dim]This confirms DOM virtualization - scroll extraction is more complete[/dim]")
-        
+            console.print(
+                f"[yellow]Warning: {len(missing_in_post)} pins captured during scrolling missing in post-scroll extraction[/yellow]"
+            )
+            console.print(
+                f"[dim]This confirms DOM virtualization - scroll extraction is more complete[/dim]"
+            )
+
         # Use scroll-extracted pins (more complete due to virtualization)
         for pin_data in pins_data:
             pin = self._create_pin_from_data(pin_data)
             if pin:
                 pins.append(pin)
-        
+
         if not pins:
             console.print(
                 "[yellow]No pins extracted. Possible login or access issue.[/yellow]"
             )
-        
-        console.print(f"[green]Extracted {len(pins)} pins from scrolling (scrolling saw {len(discovered_urls)} unique URLs)[/green]")
+
+        console.print(
+            f"[green]Extracted {len(pins)} pins from scrolling (scrolling saw {len(discovered_urls)} unique URLs)[/green]"
+        )
         return pins
 
     async def _scroll_to_load_all(self) -> tuple[set[str], list[dict]]:
         """Aggressively scroll to load ALL pins on the board.
-        
+
         Returns:
             Tuple of (unique pin image URLs, list of extracted pin data).
         """
         if not self._page:
-            return set()
+            return set(), []
 
         console.print("[dim]Starting scroll sequence to catch all pins...[/dim]")
 
@@ -602,8 +655,6 @@ class PinterestBrowser:
 
         # BALANCED DELAY: Allow lazy loading while being efficient
         base_delay = 1.0  # 1 second between scrolls
-
-        import random
 
         console.print(
             f"[dim]Config: max {max_attempts} scrolls, {max_same} no-growth checks needed[/dim]"
@@ -632,16 +683,17 @@ class PinterestBrowser:
             await self._page.evaluate(f"window.scrollTo(0, {target})")
 
         viewport = await self._page.evaluate("window.innerHeight")
-        max_attempts = (
-            await self._page.evaluate("document.body.scrollHeight") - viewport
-        ) / 200  # 200px per scroll step
+        max_attempts = int(
+            (await self._page.evaluate("document.body.scrollHeight") - viewport) / 200
+        )
+        max_attempts = max(max_attempts, 20)  # floor at 20 scrolls
 
         console.print(
-            f"[dim]Calculated max scroll count based on page height: {int(max_attempts)}[/dim]"
+            f"[dim]Calculated max scroll count based on page height: {max_attempts}[/dim]"
         )
 
         while scroll_attempts < max_attempts:
-            if _shutdown_event.is_set():
+            if self._shutdown_event is not None and self._shutdown_event.is_set():
                 console.print("[yellow]Scroll interrupted by shutdown signal[/yellow]")
                 break
             scroll_attempts += 1
@@ -712,14 +764,14 @@ class PinterestBrowser:
 
                 pin_count = extracted_pins["count"]
                 current_pins = extracted_pins["pins"]
-                
+
                 # Extract URLs and deduplicate
                 current_urls = set()
                 for pin in current_pins:
                     image_url = pin.get("image_url")
                     if image_url:
                         current_urls.add(image_url)
-                        
+
                         # Add new pins to extracted list
                         if image_url not in all_discovered_pins:
                             all_extracted_pins.append(pin)
@@ -746,25 +798,30 @@ class PinterestBrowser:
 
                 last_pin_count = len(all_discovered_pins)
 
-                # Exit only after EXTENSIVE stable checks AND minimum scrolls
-                min_scrolls = max_attempts  # Always do at least 20 scrolls
-                if scroll_attempts >= min_scrolls or pin_growth_stalled >= max_same:
+                # Exit at hard ceiling
+                if scroll_attempts >= max_attempts:
+                    console.print(
+                        f"\n[yellow]✓ Reached max scroll limit ({max_attempts} scrolls, {len(all_discovered_pins)} pins)[/yellow]"
+                    )
+                    return all_discovered_pins, all_extracted_pins
+                # Early exit when pin count has been stable for max_same consecutive checks
+                MIN_SCROLLS = 10
+                if pin_growth_stalled >= max_same and scroll_attempts >= MIN_SCROLLS:
                     console.print(
                         f"\n[yellow]✓ Exited after {scroll_attempts} scrolls (stable at {len(all_discovered_pins)} pins, extracted {len(all_extracted_pins)} pin data entries)[/yellow]"
                     )
                     return all_discovered_pins, all_extracted_pins
 
             except Exception as e:
-                console.print(
-                    f"[dim]  Scroll {scroll_attempts}: Counting...[/dim]", end="\r"
-                )
-                pass
+                logger.debug(f"Scroll {scroll_attempts} extract error: {e}")
 
             # Visual progress for long scrolls
             if scroll_attempts > 0 and scroll_attempts % 10 == 0:
                 console.print(
                     f"\n[dim]→ Scroll progress: {scroll_attempts}/{max_attempts}, pins seen: {last_pin_count}[/dim]"
                 )
+
+        return all_discovered_pins, all_extracted_pins
 
     async def _extract_pins_from_page(self) -> list[dict[str, Any]]:
         """Extract pin data from loaded page with deduplication."""
@@ -893,13 +950,12 @@ class PinterestBrowser:
             # Transform URL to get higher quality image if possible
             # Similar to what scraper.py does
             transformed_url = image_url
-            if '/originals/' not in transformed_url:
+            if "/originals/" not in transformed_url:
                 # Replace size patterns like /236x/, /474x/, /736x/, etc. with /originals/
-                import re
-                transformed_url = re.sub(r'/\d+x\w*/', '/originals/', transformed_url)
+                transformed_url = re.sub(r"/\d+x\w*/", "/originals/", transformed_url)
                 # Also handle patterns like _736x.jpg -> _original.jpg
-                transformed_url = re.sub(r'_\d+x\.', '_original.', transformed_url)
-            
+                transformed_url = re.sub(r"_\d+x\.", "_original.", transformed_url)
+
             title = str(data.get("title", "") or f"Pin_{pin_id}")
             description = str(data.get("description", title))
 
@@ -922,7 +978,12 @@ class PinterestBrowser:
         if not self._page:
             return []
 
-        await self._page.goto(f"{self.BASE_URL}/_saved/", wait_until="domcontentloaded")
+        username = getattr(self.config, "pinterest_username", None)
+        if username:
+            profile_url = f"{self.BASE_URL}/{username}/boards/"
+        else:
+            profile_url = f"{self.BASE_URL}/"
+        await self._page.goto(profile_url, wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(2)
 
         try:
@@ -949,7 +1010,3 @@ class PinterestBrowser:
         except Exception as e:
             logger.error(f"Failed to get user boards: {e}")
             return []
-
-
-# Global shutdown event for clean cancellation
-_shutdown_event = asyncio.Event()

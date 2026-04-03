@@ -136,20 +136,16 @@ python -m pinterest_downloader download https://pinterest.com/username/board-nam
 
 ### Download all your boards
 ```bash
-# Using browser automation (requires login)
-python -m pinterest_downloader all-boards --method browser --archive tar.gz
-
-# Using API (if you have credentials)
-python -m pinterest_downloader all-boards --method api --archive tar.gz
+# Download all boards (requires Pinterest API credentials)
+python -m pinterest_downloader all-boards --archive tar.gz
 ```
+
+> **Note:** `all-boards` only supports the API method. For browser-based downloading, use the `download` command with `--method browser` for each board individually.
 
 ### List boards
 ```bash
-# List boards via browser (interactive)
-python -m pinterest_downloader list --method browser
-
 # List boards via API (requires credentials)
-python -m pinterest_downloader list --method api
+python -m pinterest_downloader list
 ```
 
 ### Headless browser mode
@@ -187,6 +183,8 @@ python -m pinterest_downloader setup
 | `PINTEREST_APP_ID` | Pinterest App ID | - |
 | `PINTEREST_APP_SECRET` | Pinterest App Secret | - |
 | `PINTEREST_ACCESS_TOKEN` | OAuth Access Token | - |
+| `PINTEREST_USERNAME` | Pinterest username/email for browser login | - |
+| `PINTEREST_PASSWORD` | Pinterest password for browser login | - |
 | `OUTPUT_DIR` | Default output directory | ./downloads |
 | `MAX_CONCURRENT_DOWNLOADS` | Concurrent download limit | 5 |
 | `REQUEST_TIMEOUT` | Request timeout in seconds | 30 |
@@ -217,16 +215,15 @@ pinterest_downloader/
 
 ## Method Comparison
 
-| Feature | Web Scraping Browser Automation | Pinterest API |
-|---------|-----------|-------------|
-| **Public Boards** | ✓ Works | ✓ Works |
-| **Private Boards** | ✓ Works | ✓ Works |
-| **Shared Boards** | ✓ Works | ✓ Works |
-| **Credentials Required** | ✗ No | ✓ Yes (Business + approval) |
-| **Setup Complexity** | Low | High |
-| **Compilation Risk** | Low | High |
-| **Rate Limiting** | Built-in | Built-in |
-| **Performance** | Medium | Fast |
+| Feature | Web Scraping | Browser Automation | Pinterest API |
+|---------|:---:|:---:|:---:|
+| **Public Boards** | ✓ Works | ✓ Works | ✓ Works |
+| **Private Boards** | ✗ No | ✓ Works | ✓ Works |
+| **Shared Boards** | ✗ No | ✓ Works | ✓ Works |
+| **Credentials Required** | ✗ No | ✗ No (optional) | ✓ Yes (Business + approval) |
+| **Setup Complexity** | Low | Low | High |
+| **Rate Limiting** | Built-in | Built-in | Built-in |
+| **Performance** | Fast | Medium | Fast |
 
 ## Performance & Stability Features
 
