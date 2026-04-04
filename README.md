@@ -6,7 +6,7 @@ A CLI tool to download and archive Pinterest boards with highest quality media.
 
 - **Multiple access methods**: API, web scraping, or browser automation
 - Download all media from public or private Pinterest boards
-- Highest quality image/video downloads with original filenames
+- Configurable image quality: `736x` (default), original upload, or as-scraped — with automatic 404 fallback
 - Create archives (ZIP, TAR, TAR.GZ, TAR.BZ2) for easy storage
 - Async downloads with progress tracking and resume support
 - Duplicate detection via content hashing
@@ -181,6 +181,29 @@ python -m pinterest_downloader download URL --method browser
 python -m pinterest_downloader download URL --method browser --headless
 ```
 
+### Image quality
+
+By default, downloads are upgraded to **736x** (the highest reliably-available Pinterest size for standard pins). Use `--quality` / `-q` to control this:
+
+```bash
+# Default: upgrades thumbnails to 736x automatically
+python -m pinterest_downloader download URL --method browser
+
+# Attempt full original upload resolution (falls back to 736x then as-scraped on 404)
+python -m pinterest_downloader download URL --method browser --quality original
+
+# Exact thumbnail URL as scraped (not recommended — may be 474x or smaller)
+python -m pinterest_downloader download URL --method browser --quality default
+```
+
+| Mode | Candidate URLs tried (in order) | Use case |
+|------|----------------------------------|----------|
+| `large` (default) | `736x` → scraped URL | Best quality for nearly all pins |
+| `original` | `originals` → `736x` → scraped URL | User-uploaded high-res art/photos |
+| `default` | scraped URL only | Exact thumbnail, no upgrade |
+
+> Pinterest CDN pin URLs follow the pattern `https://i.pinimg.com/{size}/xx/xx/xx/hash.jpg`. Only the size segment changes — `236x`, `474x`, `736x`, `originals`. The `736x` tier is available for virtually all pins; `/originals/` is only present for some user-uploaded content.
+
 ### Verbose mode (for debugging)
 ```bash
 python -m pinterest_downloader -v download https://pinterest.com/username/board-name --method browser
@@ -201,6 +224,7 @@ python -m pinterest_downloader setup
 | `-c, --config-file` | Path to .env config file |
 | `-r, --resume` | Resume interrupted downloads |
 | `--headless` | Run browser in headless mode (with `--method browser`) |
+| `-q, --quality` | Image quality: `large` 736x (default), `original` full-res with fallback, `default` as-scraped |
 | `-v, --verbose` | Enable verbose logging |
 
 ## Environment Variables
@@ -269,6 +293,7 @@ pinterest_downloader/
 - **Error recovery**: Exponential backoff with capped retries
 - **Bounded memory**: LRU eviction for hash cache to prevent memory growth
 - **Board-accurate browser extraction**: Board feed scoping + numeric pin ID filtering for near-complete board pin capture while excluding non-board content
+- **Quality-aware downloads**: Configurable CDN size-tier selection with automatic 404 fallback chain
 - **Clean stall detection**: Scroll loop exits after 3 consecutive no-growth checks
 
 ## Error Handling
@@ -280,6 +305,7 @@ pinterest_downloader/
 
 **Scraping & Browser Mode:**
 - 404 Not Found: Clear error reporting
+- Quality fallback: On `--quality original`, 404 on `/originals/` automatically retries at `736x` then scraped URL
 - Login required: Clean message with method suggestion
 - Rate limiting: Built-in delays and retries
 - Headless login constraint: Explicit guidance to run headed once to save cookies
