@@ -76,6 +76,11 @@ class PinterestBrowser:
                 username=config.pinterest_username, password=config.pinterest_password
             )
 
+    @property
+    def _render_wait(self) -> float:
+        """Base wait time after navigation. Longer in headless (no GPU compositing)."""
+        return 3.5 if self.headless else 2.0
+
     async def __aenter__(self) -> "PinterestBrowser":
         if self._closed:
             raise RuntimeError("Browser has already been closed")
@@ -94,8 +99,9 @@ class PinterestBrowser:
             "--disable-blink-features=AutomationControlled",
             "--disable-extensions",
             "--no-sandbox",
-            "--start-maximized",
         ]
+        if not self.headless:
+            launch_args.append("--start-maximized")
 
         self._browser = await playwright.chromium.launch(
             headless=self.headless,
@@ -105,13 +111,21 @@ class PinterestBrowser:
         cookies_path = Path(self.config.output_dir) / self.COOKIES_FILE
         cookies_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Don't set viewport - let browser use maximized size automatically
-        self._context = await self._browser.new_context(
-            no_viewport=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="en-US",
-            storage_state=None,  # Don't auto-load, we'll decide
-        )
+        if self.headless:
+            self._context = await self._browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                screen={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="en-US",
+                storage_state=None,
+            )
+        else:
+            self._context = await self._browser.new_context(
+                no_viewport=True,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="en-US",
+                storage_state=None,
+            )
 
         # Try loading cookies first
         if cookies_path.exists():
@@ -135,6 +149,13 @@ class PinterestBrowser:
                 logger.warning(f"Could not load cookies: {e}")
 
         self._page = await self._context.new_page()
+        if self.headless:
+            await self._page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+            """)
 
     async def close(self) -> None:
         """Close the browser."""
@@ -172,7 +193,7 @@ class PinterestBrowser:
             await self._page.goto(
                 f"{self.BASE_URL}/", wait_until="domcontentloaded", timeout=15000
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(self._render_wait)
             if await self._has_login_indicators():
                 # Optionally verify we're logged in as the expected account
                 if self.config.pinterest_username:
@@ -213,6 +234,13 @@ class PinterestBrowser:
                 console.print("[yellow]Auto-login failed, will try manual[/yellow]")
 
         # Check 4: Manual interactive login
+        # In headless mode, manual login is impossible — abort cleanly
+        if self.headless:
+            console.print(
+                "[red]✗ Headless mode: cannot perform manual login. "
+                "Provide credentials via config or ensure cookies are saved from a headed run.[/red]"
+            )
+            return False
         return await self._perform_manual_login()
 
     async def _quick_login_check(self) -> bool:
@@ -287,7 +315,7 @@ class PinterestBrowser:
             await self._page.goto(
                 f"{self.BASE_URL}/login", wait_until="domcontentloaded", timeout=30000
             )
-            await asyncio.sleep(2)  # Wait for dynamic content
+            await asyncio.sleep(self._render_wait)  # Wait for dynamic content
         except Exception as e:
             console.print(f"[yellow]Login page slow: {e}[/yellow]")
             return False
@@ -455,7 +483,13 @@ class PinterestBrowser:
             if i % 5 == 4:
                 console.print(f"[dim]Still on login... ({(i + 1) * 2}s)[/dim]")
 
-        console.print("[red]✗ Login timeout - manual intervention needed[/red]")
+        if self.headless:
+            console.print(
+                "[red]✗ Auto-login failed in headless mode. "
+                "Run once with --no-headless to save cookies, then retry headless.[/red]"
+            )
+        else:
+            console.print("[red]✗ Login timeout - manual intervention needed[/red]")
         return False
 
     async def _perform_manual_login(self) -> bool:
@@ -553,7 +587,7 @@ class PinterestBrowser:
             await self._page.goto(
                 board_url, wait_until="domcontentloaded", timeout=30000
             )
-            await asyncio.sleep(3)
+            await asyncio.sleep(self._render_wait)
         except Exception as e:
             console.print(f"[yellow]Timed out: {e}[/yellow]")
             console.print("[dim]Continuing with current state...[/dim]")
@@ -657,7 +691,10 @@ class PinterestBrowser:
         base_delay = 1.0  # 1 second between scrolls
 
         viewport = await self._page.evaluate("window.innerHeight")
-        viewport_step = max(1, int(viewport * 0.9))
+        if not viewport:
+            vp = self._page.viewport_size
+            viewport = (vp["height"] if vp else None) or 1080
+        viewport_step = max(200, int(viewport * 0.9))
         max_attempts = 50
 
         console.print(
@@ -806,10 +843,16 @@ class PinterestBrowser:
     async def _smart_scroll(self, page, current_y: int) -> int:
         """Scroll one viewport-height step. Returns new scroll Y position."""
         viewport_height = await page.evaluate("window.innerHeight")
-        step = int(viewport_height * 0.9)  # 90% overlap for lazy loader
+        if not viewport_height:
+            # Fallback: use context viewport or a safe default
+            vp = page.viewport_size
+            viewport_height = (vp["height"] if vp else None) or 1080
+        step = int(viewport_height * 0.9)
         new_y = current_y + step
         await page.evaluate(f"window.scrollTo(0, {new_y})")
-        await asyncio.sleep(0.4)
+        # Slightly longer wait in headless for lazy-loader to fire
+        wait = 0.6 if self.headless else 0.4
+        await asyncio.sleep(wait)
         actual_y = await page.evaluate("window.pageYOffset")
         return actual_y
 
