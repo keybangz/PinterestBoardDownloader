@@ -869,14 +869,7 @@ class PinterestBrowser:
             if not image_url:
                 return None
 
-            # Transform URL to get higher quality image if possible
-            # Similar to what scraper.py does
             transformed_url = image_url
-            if pin_id.isdigit() and "/originals/" not in transformed_url:
-                # Replace size patterns like /236x/, /474x/, /736x/, etc. with /originals/
-                transformed_url = re.sub(r"/\d+x\w*/", "/originals/", transformed_url)
-                # Also handle patterns like _736x.jpg -> _original.jpg
-                transformed_url = re.sub(r"_\d+x\.", "_original.", transformed_url)
 
             title = str(data.get("title", "") or f"Pin_{pin_id}")
             description = str(data.get("description", title))
