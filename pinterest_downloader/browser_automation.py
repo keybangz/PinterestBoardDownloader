@@ -769,68 +769,69 @@ class PinterestBrowser:
 
                 current_pins = extracted_pins.get("pins", [])
                 sentinel_found = extracted_pins.get("sentinel_found", False)
-
-                # Extract URLs and deduplicate
-                current_urls = set()
-                for pin in current_pins:
-                    image_url = pin.get("src")
-                    if image_url:
-                        current_urls.add(image_url)
-
-                        # Add new pins to extracted list
-                        if image_url not in all_discovered_pins:
-                            all_extracted_pins.append(
-                                {
-                                    "id": pin.get("pin_id", ""),
-                                    "image_url": image_url,
-                                    "title": pin.get("alt", "")
-                                    or f"Pin_{pin.get('pin_id', '')}",
-                                }
-                            )
-
-                    pin_id = str(pin.get("pin_id", ""))
-                    if pin_id.isdigit():
-                        all_discovered_pin_ids.add(pin_id)
-
-                # Update persistent cache with any NEW pins discovered
-                new_pins = current_urls - all_discovered_pins
-                all_discovered_pins.update(new_pins)
-
-                if len(all_discovered_pin_ids) > last_valid_pin_count:
-                    console.print(
-                        f"[dim]  Scroll {scroll_attempts}: GROWING valid pins {last_valid_pin_count} → {len(all_discovered_pin_ids)} (images: {len(all_discovered_pins)})[/dim]"
-                    )
-                    pin_growth_stalled = 0
-                else:
-                    pin_growth_stalled += 1
-                    console.print(
-                        f"[dim]  Scroll {scroll_attempts}: STALLED valid pins at {len(all_discovered_pin_ids)} ({pin_growth_stalled}/3)[/dim]"
-                    )
-
-                last_valid_pin_count = len(all_discovered_pin_ids)
-
-                if sentinel_found:
-                    console.print(
-                        "\n[yellow]✓ Related-content sentinel detected; stopping at board boundary[/yellow]"
-                    )
-                    return all_discovered_pins, all_extracted_pins
-
-                # Exit at hard ceiling
-                if scroll_attempts >= max_attempts:
-                    console.print(
-                        f"\n[yellow]✓ Reached max scroll limit ({max_attempts} scrolls, {len(all_discovered_pins)} pins)[/yellow]"
-                    )
-                    return all_discovered_pins, all_extracted_pins
-                # Early exit when pin count has been stable for max_same consecutive checks
-                MIN_SCROLLS = 10
-                if pin_growth_stalled >= max_same and scroll_attempts >= MIN_SCROLLS:
-                    console.print(
-                        f"\n[yellow]✓ Exited after {scroll_attempts} scrolls (stable at {len(all_discovered_pins)} pins, extracted {len(all_extracted_pins)} pin data entries)[/yellow]"
-                    )
-                    return all_discovered_pins, all_extracted_pins
-
             except Exception as e:
                 logger.debug(f"Scroll {scroll_attempts} extract error: {e}")
+                current_pins = []
+                sentinel_found = False
+
+            # Extract URLs and deduplicate
+            current_urls = set()
+            for pin in current_pins:
+                image_url = pin.get("src")
+                if image_url:
+                    current_urls.add(image_url)
+
+                    # Add new pins to extracted list
+                    if image_url not in all_discovered_pins:
+                        all_extracted_pins.append(
+                            {
+                                "id": pin.get("pin_id", ""),
+                                "image_url": image_url,
+                                "title": pin.get("alt", "")
+                                or f"Pin_{pin.get('pin_id', '')}",
+                            }
+                        )
+
+                pin_id = str(pin.get("pin_id", ""))
+                if pin_id.isdigit():
+                    all_discovered_pin_ids.add(pin_id)
+
+            # Update persistent cache with any NEW pins discovered
+            new_pins = current_urls - all_discovered_pins
+            all_discovered_pins.update(new_pins)
+
+            if len(all_discovered_pin_ids) > last_valid_pin_count:
+                console.print(
+                    f"[dim]  Scroll {scroll_attempts}: GROWING valid pins {last_valid_pin_count} → {len(all_discovered_pin_ids)} (images: {len(all_discovered_pins)})[/dim]"
+                )
+                pin_growth_stalled = 0
+            else:
+                pin_growth_stalled += 1
+                console.print(
+                    f"[dim]  Scroll {scroll_attempts}: STALLED valid pins at {len(all_discovered_pin_ids)} ({pin_growth_stalled}/3)[/dim]"
+                )
+
+            last_valid_pin_count = len(all_discovered_pin_ids)
+
+            if sentinel_found:
+                console.print(
+                    "\n[yellow]✓ Related-content sentinel detected; stopping at board boundary[/yellow]"
+                )
+                return all_discovered_pins, all_extracted_pins
+
+            # Exit at hard ceiling
+            if scroll_attempts >= max_attempts:
+                console.print(
+                    f"\n[yellow]✓ Reached max scroll limit ({max_attempts} scrolls, {len(all_discovered_pins)} pins)[/yellow]"
+                )
+                return all_discovered_pins, all_extracted_pins
+            # Early exit when pin count has been stable for max_same consecutive checks
+            MIN_SCROLLS = 10
+            if pin_growth_stalled >= max_same and scroll_attempts >= MIN_SCROLLS:
+                console.print(
+                    f"\n[yellow]✓ Exited after {scroll_attempts} scrolls (stable at {len(all_discovered_pins)} pins, extracted {len(all_extracted_pins)} pin data entries)[/yellow]"
+                )
+                return all_discovered_pins, all_extracted_pins
 
             # Visual progress for long scrolls
             if scroll_attempts > 0 and scroll_attempts % 10 == 0:
