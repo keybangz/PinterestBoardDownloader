@@ -101,6 +101,19 @@ def cli(ctx: click.Context, verbose: bool) -> None:
     is_flag=True,
     help="Run browser in headless mode (with --method=browser)",
 )
+@click.option(
+    "--quality",
+    "-q",
+    type=click.Choice(["default", "large", "original"]),
+    default="default",
+    show_default=True,
+    help=(
+        "Image quality for downloads: "
+        "'default' uses the scraped thumbnail URL as-is, "
+        "'large' upgrades to 736x resolution, "
+        "'original' attempts the full-resolution original (falls back to large then default on 404)."
+    ),
+)
 @click.pass_context
 def download(
     ctx: click.Context,
@@ -111,6 +124,7 @@ def download(
     resume: bool,
     method: str,
     headless: bool,
+    quality: str,
 ) -> None:
     """Download all media from a Pinterest board."""
     config = _load_config(config_file, output)
@@ -120,7 +134,9 @@ def download(
 
     try:
         asyncio.run(
-            _download_board(board_url, config, archive, resume, method, headless)
+            _download_board(
+                board_url, config, archive, resume, method, headless, quality
+            )
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Download cancelled by user.[/yellow]")
@@ -347,6 +363,7 @@ async def _download_board(
     resume: bool,
     method: str = "api",
     headless: bool = False,
+    quality: str = "default",
 ) -> None:
     """Download a single board using specified method."""
     global _shutdown_event, _shutdown_requested
@@ -428,7 +445,7 @@ async def _download_board(
         console.print("[yellow]No downloadable pins found.[/yellow]")
         return
 
-    async with MediaDownloader(config, board_dir) as downloader:
+    async with MediaDownloader(config, board_dir, quality=quality) as downloader:
         existing_files = downloader.get_existing_files() if resume else set()
 
         if resume and existing_files:
