@@ -105,13 +105,13 @@ def cli(ctx: click.Context, verbose: bool) -> None:
     "--quality",
     "-q",
     type=click.Choice(["default", "large", "original"]),
-    default="default",
+    default="large",
     show_default=True,
     help=(
         "Image quality for downloads: "
-        "'default' uses the scraped thumbnail URL as-is, "
-        "'large' upgrades to 736x resolution, "
-        "'original' attempts the full-resolution original (falls back to large then default on 404)."
+        "'large' upgrades thumbnails to 736x (highest reliably-available size, default), "
+        "'original' attempts the full-resolution original then falls back to 736x on 404, "
+        "'default' uses the scraped URL as-is (smallest, not recommended)."
     ),
 )
 @click.pass_context
@@ -363,7 +363,7 @@ async def _download_board(
     resume: bool,
     method: str = "api",
     headless: bool = False,
-    quality: str = "default",
+    quality: str = "large",
 ) -> None:
     """Download a single board using specified method."""
     global _shutdown_event, _shutdown_requested
