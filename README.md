@@ -15,7 +15,7 @@ A CLI tool to download and archive Pinterest boards with highest quality media.
 - SSL verification option
 - Verbose logging mode for debugging
 - Non-TTY output support
-- **Improved browser automation** with DOM virtualization handling (typically captures 95-98% of pins)
+- **Reliable browser automation** with board-scoped extraction, `/pin/{numeric_id}/` filtering, DOM virtualization handling, and clean stall detection
 
 ## Installation
 
@@ -32,15 +32,30 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Current runtime dependencies in `requirements.txt`:
+- `aiohttp`
+- `aiofiles`
+- `click`
+- `rich`
+- `python-dotenv`
+- `beautifulsoup4`
+- `lxml`
+- `playwright`
+
+> Note: browser automation requires Playwright browser binaries:
+>
+> ```bash
+> playwright install chromium
+> ```
+
 ## Access Methods
 
 This tool provides **three methods** to download Pinterest boards depending on your situation:
 
-### Method 1: Web Scraping (Recommended for Public Boards)
-**Best for:** Public boards, no credentials required
+### Method 1: Web Scraping (Public-only fallback)
+**Best for:** Public boards when you want a no-login workflow
 
 ```bash
-# Automatically uses scraping for public boards
 python -m pinterest_downloader download https://pinterest.com/username/board-name --method scrape
 ```
 
@@ -50,22 +65,26 @@ python -m pinterest_downloader download https://pinterest.com/username/board-nam
 - Uses multiple user-agents and rate limiting
 - Extracts embedded JSON or falls back to HTML parsing
 
-### Method 2: Browser Automation (Recommended for Private Boards)
-**Best for:** Private boards, shared boards, boards requiring login
+### Method 2: Browser Automation (Recommended for most users)
+**Best for:** Most board downloads (public or private), especially when reliability matters
 
 ```bash
-# Opens browser for interactive login
+# Recommended first run: headed (interactive) login
 python -m pinterest_downloader download https://pinterest.com/username/board-name --method browser
 
-# Headless mode (requires prior login)
+# Subsequent runs can be headless after cookies are saved
 python -m pinterest_downloader download https://pinterest.com/username/board-name --method browser --headless
 ```
 
 **Features:**
 - Interactive login via browser (saves cookies for future use)
-- Handles boards requiring login
-- Scrolls to load all pins dynamically
-- No API credentials needed
+- Handles public, private, and shared boards
+- Anti-detection launch settings and headless stealth scripts
+- Correct viewport/screen settings for stable headless behavior
+- Board-scoped extraction with `/pin/{numeric_id}/` gating to keep board pins and exclude related/sidebar/ads content
+- Scroll loop exits cleanly after **3 consecutive no-growth checks**
+
+> **Important headless workflow:** Run **headed once first** to complete login and save cookies. After that, `--headless` works reliably for repeat runs.
 
 ### Method 3: Pinterest API (Limited availability)
 **Best for:** Business accounts with approved API access
@@ -79,13 +98,18 @@ python -m pinterest_downloader download https://pinterest.com/username/board-nam
 ## Setup
 
 ### Option A: Web Scraping / Browser Automation
-**No setup required!** Just install dependencies and start downloading.
+**No API setup required.** Install dependencies and start downloading.
 
 ```bash
 pip install -r requirements.txt
 # For browser automation, install Playwright browsers:
 playwright install chromium
 ```
+
+For browser automation with `--headless`, use this workflow:
+1. Run one download in headed mode (`--method browser`) and log in interactively
+2. Let the run save `pinterest_cookies.json` in your output directory
+3. Use `--headless` on future runs
 
 ### Option B: Pinterest API Access (Limited)
 
@@ -111,11 +135,11 @@ PINTEREST_ACCESS_TOKEN=your_access_token
 
 ### Download a single board
 ```bash
-# Web scraping (recommended for public boards)
-python -m pinterest_downloader download https://pinterest.com/username/board-name --method scrape
-
-# Browser automation (recommended for private boards)
+# Browser automation (recommended for most users)
 python -m pinterest_downloader download https://pinterest.com/username/board-name --method browser
+
+# Web scraping (public-only fallback)
+python -m pinterest_downloader download https://pinterest.com/username/board-name --method scrape
 
 # API (only if you have approved credentials)
 python -m pinterest_downloader download https://pinterest.com/username/board-name --method api
@@ -124,14 +148,14 @@ python -m pinterest_downloader download https://pinterest.com/username/board-nam
 ### Download with options
 ```bash
 python -m pinterest_downloader download https://pinterest.com/username/board-name \
-    --method scrape \
+    --method browser \
     --output ./my_downloads \
     --archive zip
 ```
 
 ### Resume interrupted download
 ```bash
-python -m pinterest_downloader download https://pinterest.com/username/board-name --method scrape --resume
+python -m pinterest_downloader download https://pinterest.com/username/board-name --method browser --resume
 ```
 
 ### Download all your boards
@@ -150,16 +174,19 @@ python -m pinterest_downloader list
 
 ### Headless browser mode
 ```bash
-# Login once with interactive mode, then use headless
+# First run headed once to save cookies
+python -m pinterest_downloader download URL --method browser
+
+# Then run headless
 python -m pinterest_downloader download URL --method browser --headless
 ```
 
 ### Verbose mode (for debugging)
 ```bash
-python -m pinterest_downloader -v download https://pinterest.com/username/board-name --method scrape
+python -m pinterest_downloader -v download https://pinterest.com/username/board-name --method browser
 ```
 
-### Interactive setup (API only)
+### Interactive setup (API and/or browser credentials)
 ```bash
 python -m pinterest_downloader setup
 ```
@@ -173,7 +200,7 @@ python -m pinterest_downloader setup
 | `-a, --archive` | Archive format: zip, tar, tar.gz, tar.bz2, none |
 | `-c, --config-file` | Path to .env config file |
 | `-r, --resume` | Resume interrupted downloads |
-| `--headless` | Run browser in headless mode |
+| `--headless` | Run browser in headless mode (with `--method browser`) |
 | `-v, --verbose` | Enable verbose logging |
 
 ## Environment Variables
@@ -188,11 +215,12 @@ python -m pinterest_downloader setup
 | `OUTPUT_DIR` | Default output directory | ./downloads |
 | `MAX_CONCURRENT_DOWNLOADS` | Concurrent download limit | 5 |
 | `REQUEST_TIMEOUT` | Request timeout in seconds | 30 |
+| `CONNECT_TIMEOUT` | Connection timeout in seconds | 10 |
 | `MAX_RETRIES` | Max retry attempts | 3 |
 | `CHUNK_SIZE` | Download chunk size in bytes | 65536 |
 | `VERIFY_DUPLICATES` | Check for duplicate content | true |
 | `VERIFY_SSL` | Verify SSL certificates | true |
-| `RATE_LIMIT_DELAY` | Delay between API calls | 0.1 |
+| `RATE_LIMIT_DELAY` | Delay between API/scrape calls | 0.1 |
 | `MAX_HASH_CACHE_SIZE` | Max cached file hashes | 10000 |
 | `MIN_FREE_DISK_MB` | Minimum free disk space (MB) | 100 |
 | `MAX_FILE_SIZE_MB` | Maximum file size to download (MB) | 500 |
@@ -221,8 +249,9 @@ pinterest_downloader/
 | **Private Boards** | ✗ No | ✓ Works | ✓ Works |
 | **Shared Boards** | ✗ No | ✓ Works | ✓ Works |
 | **Credentials Required** | ✗ No | ✗ No (optional) | ✓ Yes (Business + approval) |
+| **Recommended for most users** | ◐ Public-only | ✓ Yes | ✗ Limited access |
 | **Setup Complexity** | Low | Low | High |
-| **Rate Limiting** | Built-in | Built-in | Built-in |
+| **Rate Limiting / stability controls** | Built-in | Built-in | Built-in |
 | **Performance** | Fast | Medium | Fast |
 
 ## Performance & Stability Features
@@ -239,6 +268,8 @@ pinterest_downloader/
 - **Graceful shutdown**: Signal handling for clean interruption
 - **Error recovery**: Exponential backoff with capped retries
 - **Bounded memory**: LRU eviction for hash cache to prevent memory growth
+- **Board-accurate browser extraction**: Board feed scoping + numeric pin ID filtering for near-complete board pin capture while excluding non-board content
+- **Clean stall detection**: Scroll loop exits after 3 consecutive no-growth checks
 
 ## Error Handling
 
@@ -251,6 +282,7 @@ pinterest_downloader/
 - 404 Not Found: Clear error reporting
 - Login required: Clean message with method suggestion
 - Rate limiting: Built-in delays and retries
+- Headless login constraint: Explicit guidance to run headed once to save cookies
 
 **All Modes:**
 - Disk Full: Early detection and graceful failure
@@ -268,7 +300,7 @@ python -m pinterest_downloader download URL --method browser
 
 ### "403 Forbidden" Error
 ```bash
-# Try browser automation instead of scraping
+# Browser automation is typically more reliable
 python -m pinterest_downloader download URL --method browser
 ```
 
@@ -278,15 +310,33 @@ python -m pinterest_downloader download URL --method browser
 playwright install chromium
 ```
 
+### Headless mode can't log in
+Headless mode cannot complete manual login prompts.
+
+Use this sequence:
+1. Run once in headed mode and log in:
+   ```bash
+   python -m pinterest_downloader download URL --method browser
+   ```
+2. Re-run with headless:
+   ```bash
+   python -m pinterest_downloader download URL --method browser --headless
+   ```
+
+### Pin counts differ from Pinterest UI count
+Current browser extraction is board-scoped and filters to valid `/pin/{numeric_id}/` links. This is intentional:
+- Includes board pins with near-complete accuracy
+- Excludes related pins, sidebar suggestions, and ad/non-board content
+- Stops scrolling cleanly after 3 consecutive no-growth checks to avoid endless loops
+
+If a board still appears short, retry with browser automation (headed once, then headless if desired):
+```bash
+python -m pinterest_downloader download URL --method browser
+```
+
 ### API access denied
 Unfortunately, Pinterest rarely approves new API applications.
 Use browser automation or web scraping instead.
-
-### Missing pins with browser automation
-The browser automation method has been improved to handle Pinterest's DOM virtualization:
-- Extracts pins incrementally during scrolling before they're removed from DOM
-- Uses URL-based deduplication for accurate pin counting
-- Typically captures 95-98% of expected pins (43/44 in tests)
 
 ## License
 
